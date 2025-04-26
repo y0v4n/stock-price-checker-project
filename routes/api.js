@@ -3,24 +3,32 @@
 const mongoose = require('mongoose');
 const fetch = require('node-fetch');
 const crypto = require('crypto');
+
+// Function to hash IP addresses for privacy
 const hashIP = (ip) => {
   return crypto.createHash('sha256').update(ip).digest('hex');
 };
 
+// Function to normalize IP addresses (handles IPv6-mapped IPv4)
+const getNormalizedIP = (req) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  return ip.includes('::ffff:') ? ip.split('::ffff:')[1] : ip;
+};
+
+// Connect to MongoDB
 mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
 
-// MongoDB Model
+// Define MongoDB schema and model
 const stockSchema = new mongoose.Schema({
   stock: { type: String, required: true },
   likes: { type: Number, default: 0 },
-  ips: [String] // To track IP addresses that liked
+  ips: [String]
 });
 const Stock = mongoose.model('Stock', stockSchema);
 
-// Function to fetch stock price (Example API: https://stock-price-checker-proxy.freecodecamp.rocks/v1/stock/{symbol}/quote)
+// Function to fetch stock price from FCC proxy API
 async function getStockPrice(stockSymbol) {
   const url = `https://stock-price-checker-proxy.freecodecamp.rocks/v1/stock/${stockSymbol}/quote`;
-
   const response = await fetch(url);
   const data = await response.json();
   if (!data || !data.latestPrice) {
@@ -34,26 +42,31 @@ module.exports = function (app) {
   app.route('/api/stock-prices')
     .get(async function (req, res) {
       try {
-        const { stock, like } = req.query;
-        const userIP = hashIP(req.ip);
+        let { stock, like } = req.query;
 
-        // Helper to handle single stock logic
+        // Normalize like parameter
+        like = like === 'true' || like === '1' || like === 1 || like === true;
+
+        const normalizedIP = getNormalizedIP(req);
+        const userIP = hashIP(normalizedIP);
+
+        // Function to process individual stock
         const processStock = async (stockSymbol) => {
           const stockSymbolUpper = stockSymbol.toUpperCase();
           const price = await getStockPrice(stockSymbolUpper);
 
           let stockDoc = await Stock.findOne({ stock: stockSymbolUpper });
-
           if (!stockDoc) {
             stockDoc = new Stock({ stock: stockSymbolUpper });
           }
 
           // Handle like logic
-          if (like === 'true' && !stockDoc.ips.includes(userIP)) {
+          if (like && !stockDoc.ips.includes(userIP)) {
             stockDoc.likes += 1;
             stockDoc.ips.push(userIP);
-            await stockDoc.save();
           }
+
+          await stockDoc.save(); // Always save to ensure stock/IP persistence
 
           return {
             stock: stockSymbolUpper,
@@ -71,25 +84,21 @@ module.exports = function (app) {
             return s.likes - stockData[otherIndex].likes;
           });
 
-          const responseObj = {
+          res.json({
             stockData: stockData.map((s, i) => ({
               stock: s.stock,
               price: s.price,
               rel_likes: rel_likes[i]
             }))
-          };
-
-          res.json(responseObj);
+          });
         } else {
           const stockData = await processStock(stock);
-
-          res.json({
-            stockData
-          });
+          res.json({ stockData });
         }
 
       } catch (error) {
         res.status(500).json({ error: error.message });
       }
     });
+
 };
